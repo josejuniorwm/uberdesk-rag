@@ -1,0 +1,28 @@
+# Dependências
+node_modules/
+npm-debug.log*
+
+# Configurações sensíveis (MUITO IMPORTANTE)
+.env
+.env.local
+.env.production
+.env.development
+
+# Pasta de Build do React
+frontend/dist/
+frontend/build/
+
+# Arquivos do Sistema
+.DS_Store
+Thumbs.db
+
+# Pastas de dados de Containers (Volumes Docker)
+mysql-data/
+qdrant_storage/
+
+# Ignorar dados de volumes e modelos pesados
+mysql-data/
+qdrant_storage/
+ollama-models/
+*.pdf
+*.md

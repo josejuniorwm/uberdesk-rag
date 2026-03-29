@@ -1,0 +1,14 @@
+Options -MultiViews
+RewriteEngine On
+
+# Redireciona HTTP -> HTTPS (aaPanel já faz isso, mas como fallback)
+# RewriteCond %{HTTPS} off
+# RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Serve arquivos e diretórios existentes diretamente (CSS, JS, imagens, etc.)
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Qualquer outra rota cai no index.html — necessário para o React Router funcionar
+RewriteRule ^ index.html [L]

@@ -1,0 +1,63 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: rag-mysql
+    restart: always
+    environment:
+      MYSQL_DATABASE: dashbyte_chat
+      MYSQL_USER: dashbyte_user
+      MYSQL_PASSWORD: efNaekDtcZFjCmbA
+      MYSQL_ROOT_PASSWORD: root_password_super_secreta
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama
+    container_name: rag-ollama
+    restart: always
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ./ollama-models:/root/.ollama
+
+  backend:
+    build: ./backend
+    container_name: rag-node
+    restart: always
+    ports:
+      - "3001:3001"
+    environment:
+      - DB_HOST=db
+      - DB_USER=dashbyte_user
+      - DB_PASS=efNaekDtcZFjCmbA
+      - OLLAMA_URL=http://ollama:11434
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-documentos_pdf}
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    volumes:
+      - ./backend/storage:/app/storage
+
+  frontend:
+    build: ./frontend
+    container_name: rag-react
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - WDS_SOCKET_PORT=0 
+    depends_on:
+      - backend
