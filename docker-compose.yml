@@ -1,32 +1,99 @@
+# =============================================================================
+# docker-compose.yml — Orquestração de Containers do Sistema RAG Uberdesk
+# =============================================================================
+#
+# Serviços definidos:
+#   db       → MySQL 8.0          (persistência relacional: users, files, messages)
+#   ollama   → Ollama             (servidor LLM local — atualmente não utilizado pelo backend)
+#   backend  → Node.js/Express    (API REST + pipeline RAG)
+#   frontend → React (CRA)        (interface web)
+#
+# Fluxo de rede interna (bridge Docker):
+#   frontend → backend:3001 → db:3306
+#                           → Qdrant Cloud (externo, via QDRANT_URL)
+#                           → Groq API     (externo, via GROQ_API_KEY)
+#
+# SEGURANÇA — Variáveis sensíveis:
+#   As variáveis GROQ_API_KEY, QDRANT_URL, QDRANT_API_KEY devem estar em um
+#   arquivo .env na raiz do projeto (nunca versionado — adicionar ao .gitignore).
+#   Exemplo de .env:
+#     GROQ_API_KEY=gsk_...
+#     QDRANT_URL=https://...qdrant.io
+#     QDRANT_API_KEY=...
+#     JWT_SECRET=$(openssl rand -hex 64)
+#
+# =============================================================================
+
 services:
+  # ---------------------------------------------------------------------------
+  # SERVIÇO: db — Banco de Dados Relacional MySQL 8.0
+  # ---------------------------------------------------------------------------
+  # Armazena:
+  #   - users      : credenciais de usuário (email, bcrypt hash de senha)
+  #   - files      : metadados de arquivos/pastas por usuário
+  #   - messages   : histórico de conversas (user + bot)
+  #
+  # TODO: RedOps Fix — 'dashbyte_chat' e 'dashbyte_user' são referências ao template
+  #   legado 'Dashbyte'. Renomear para 'uberdesk' após migração definitiva do banco.
+  #
+  # SEGURANÇA CRÍTICA — Credenciais hardcoded abaixo:
+  #   MYSQL_PASSWORD e MYSQL_ROOT_PASSWORD estão em texto plano.
+  #   TODO: RedOps Fix — Migrar para Docker Secrets ou variáveis de ambiente:
+  #     MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+  #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+  #   E definir no .env (nunca commitar as senhas reais no repositório).
   db:
     image: mysql:8.0
     container_name: rag-mysql
     restart: always
     environment:
-      MYSQL_DATABASE: dashbyte_chat
-      MYSQL_USER: dashbyte_user
-      MYSQL_PASSWORD: efNaekDtcZFjCmbA
-      MYSQL_ROOT_PASSWORD: root_password_super_secreta
+      MYSQL_DATABASE: dashbyte_chat   # TODO: RedOps Fix — renomear para 'uberdesk' (ref. legada Dashbyte)
+      MYSQL_USER: dashbyte_user       # TODO: RedOps Fix — renomear para 'uberdesk_user' (ref. legada Dashbyte)
+      MYSQL_PASSWORD: efNaekDtcZFjCmbA        # TODO: RedOps Fix — mover para ${MYSQL_PASSWORD} no .env
+      MYSQL_ROOT_PASSWORD: root_password_super_secreta # TODO: RedOps Fix — mover para ${MYSQL_ROOT_PASSWORD} no .env
     volumes:
+      # Persiste dados do MySQL fora do container para sobreviver a recreações
       - ./mysql-data:/var/lib/mysql
     ports:
+      # Expõe apenas para localhost — previne acesso externo direto ao banco
       - "127.0.0.1:3306:3306"
     healthcheck:
+      # Aguardado pelo serviço backend (depends_on: condition: service_healthy)
+      # para evitar que o Node.js tente conectar antes do MySQL estar pronto
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # ---------------------------------------------------------------------------
+  # SERVIÇO: ollama — Servidor de LLM Local (Ollama)
+  # ---------------------------------------------------------------------------
+  # Executa modelos LLM localmente (ex: llama2, mistral).
+  # NOTA: Atualmente o backend usa a API da Groq (cloud) para geração de respostas.
+  # O Ollama está presente na infraestrutura mas não é chamado pelo ragService.js.
+  # TODO: RedOps Fix — Documentar se o Ollama será usado como fallback offline ou
+  #   se pode ser removido para simplificar a infra e reduzir uso de recursos.
   ollama:
     image: ollama/ollama
     container_name: rag-ollama
     restart: always
     ports:
+      # Expõe apenas para localhost — não deve ser acessível externamente
       - "127.0.0.1:11434:11434"
     volumes:
+      # Persiste modelos baixados para evitar re-download a cada recreação do container
       - ./ollama-models:/root/.ollama
 
+  # ---------------------------------------------------------------------------
+  # SERVIÇO: backend — API Node.js/Express + Pipeline RAG
+  # ---------------------------------------------------------------------------
+  # Expõe a porta 3001 para todas as interfaces (0.0.0.0) pois é acessado pelo
+  # Nginx/aaPanel que faz proxy reverso com terminação SSL.
+  #
+  # SEGURANÇA — Variáveis de ambiente:
+  #   - GROQ_API_KEY, QDRANT_URL, QDRANT_API_KEY: lidas do .env via ${VAR} — correto.
+  #   - DB_USER e DB_PASS: hardcoded — TODO: RedOps Fix migrar para ${DB_USER}/${DB_PASS}.
+  #   - JWT_SECRET ausente: TODO: RedOps Fix — adicionar JWT_SECRET=${JWT_SECRET} aqui.
   backend:
     build: ./backend
     container_name: rag-node
@@ -34,23 +101,33 @@ services:
     ports:
       - "3001:3001"
     environment:
-      - DB_HOST=db
-      - DB_USER=dashbyte_user
-      - DB_PASS=efNaekDtcZFjCmbA
-      - OLLAMA_URL=http://ollama:11434
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
-      - QDRANT_URL=${QDRANT_URL}
-      - QDRANT_API_KEY=${QDRANT_API_KEY}
-      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-documentos_pdf}
+      - DB_HOST=db                              # Nome do serviço Docker (resolução interna)
+      - DB_USER=dashbyte_user                   # TODO: RedOps Fix — usar ${DB_USER} do .env; renomear para uberdesk_user
+      - DB_PASS=efNaekDtcZFjCmbA               # TODO: RedOps Fix — usar ${DB_PASS} do .env (credencial exposta)
+      - OLLAMA_URL=http://ollama:11434          # URL interna do serviço Ollama (não utilizado pelo backend atualmente)
+      - GROQ_API_KEY=${GROQ_API_KEY}           # API Key da Groq — lida do .env (correto)
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant} # Modelo padrão com fallback seguro
+      - QDRANT_URL=${QDRANT_URL}               # URL do cluster Qdrant — lida do .env (correto)
+      - QDRANT_API_KEY=${QDRANT_API_KEY}       # API Key do Qdrant — lida do .env (correto)
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-documentos_pdf} # Nome da coleção com fallback
+      # TODO: RedOps Fix — Adicionar: JWT_SECRET=${JWT_SECRET} para evitar fallback inseguro no server.js
     depends_on:
       db:
-        condition: service_healthy
+        condition: service_healthy  # Aguarda MySQL estar respondendo antes de iniciar
       ollama:
         condition: service_started
     volumes:
+      # Monta o diretório de storage fora do container para persistir uploads de PDFs
       - ./backend/storage:/app/storage
 
+  # ---------------------------------------------------------------------------
+  # SERVIÇO: frontend — React SPA (Create React App)
+  # ---------------------------------------------------------------------------
+  # Serve a interface web do Uberdesk.
+  # Em produção, idealmente o build estático (npm run build) seria servido por
+  # Nginx diretamente, sem necessidade deste container Node.js de desenvolvimento.
+  # TODO: RedOps Fix — Separar Dockerfile de produção (nginx serve /build) do
+  #   Dockerfile de desenvolvimento (react-scripts start) para reduzir superfície de ataque.
   frontend:
     build: ./frontend
     container_name: rag-react
@@ -58,6 +135,6 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - WDS_SOCKET_PORT=0 
+      - WDS_SOCKET_PORT=0  # Fix para WebSocket do HMR (Hot Module Replacement) atrás de proxy reverso
     depends_on:
       - backend
