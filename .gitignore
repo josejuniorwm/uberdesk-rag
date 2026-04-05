@@ -25,4 +25,5 @@ mysql-data/
 qdrant_storage/
 ollama-models/
 *.pdf
-*.md
+*.md*.sql
+*.sql.gz
