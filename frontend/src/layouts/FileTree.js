@@ -637,7 +637,7 @@ const FileTree = ({
                                         title="Enviar PDF"
                                     >
                                         <i
-                                            className="ri-upload-2-line"
+                                            className="ri-upload-line"
                                             style={{
                                                 ...actionIconStyle,
                                                 color: hoveredActionId === `upload-${folder.id}` ? '#55141b' : '#475569'
@@ -653,7 +653,7 @@ const FileTree = ({
                                         title="Renomear pasta"
                                     >
                                         <i
-                                            className="ri-pencil-line"
+                                            className="ri-edit-line"
                                             style={{
                                                 ...actionIconStyle,
                                                 color: hoveredActionId === `rename-folder-${folder.id}` ? '#55141b' : '#475569'
@@ -686,7 +686,7 @@ const FileTree = ({
                             {childFiles(folder.id).map(child => {
                                 const isIndexado = child.status === 'indexado';
                                 const isRenaming = renamingFileId === child.id;
-                                console.log(`[FILE-RENDER] Arquivo: ${child.nome_arquivo}, ID: ${child.id}, Renomendo: ${isRenaming}`);
+                                console.log(`[FILE-RENDER] Arquivo: ${child.nome_arquivo || child.nome || child.name || "Documento PDF"}, ID: ${child.id}, Renomendo: ${isRenaming}`);
                                 return (
                                     <li key={child.id} className="nav-item">
                                         {/* Início da renderização do item do Arquivo */}
@@ -759,7 +759,7 @@ const FileTree = ({
                                                         style={{ border: 'none', background: 'none', cursor: 'pointer' }}
                                                     >
                                                         <i
-                                                            className="ri-pencil-line"
+                                                            className="ri-edit-line"
                                                             style={{
                                                                 color: hoveredActionId === `rename-file-${child.id}` ? '#55141b' : '#475569',
                                                                 fontSize: '16px'

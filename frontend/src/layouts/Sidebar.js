@@ -166,7 +166,7 @@ class SidebarMenu extends Component {
                 </div>
                 {/* --- NOSSA NOVA SEÇÃO DE ARQUIVOS --- */}
                 <div className="nav-group show">
-                    <div className="nav-label" onClick={this.toggleMenu}>Meus Documentos (RAG)</div>
+                    <div className="nav-label" onClick={this.toggleMenu}>Meus Documentos TESTE</div>
                     <ul className="nav nav-sidebar">
                         <li className="nav-item">
                             {/* Passamos o onUpdateSize para o scroll funcionar se a lista for grande */}
