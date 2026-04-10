@@ -6,7 +6,7 @@
  *  - Gerenciar o cliente Qdrant como singleton (evita múltiplas conexões)
  *  - Garantir que a coleção e os índices de payload existam antes de operar
  *  - Realizar upsert de chunks vetorizados com metadados
- *  - Executar busca semântica filtrada por usuário e arquivo
+ *  - Executar busca semântica filtrada por tenant de empresa e arquivos selecionados
  *
  * Arquitetura no pipeline RAG:
  *   embeddingService → [vetores] → qdrantService → Qdrant Cloud/Self-hosted
@@ -18,12 +18,9 @@ const { QdrantClient } = require('@qdrant/js-client-rest');
 const { EMBEDDING_DIMENSION } = require('./embeddingService');
 
 /**
- * @constant {string} Nome da coleção Qdrant onde os chunks de PDFs são armazenados.
- * Deve corresponder ao valor de QDRANT_COLLECTION no docker-compose.yml.
- * TODO: RedOps Fix — Externalizar para process.env.QDRANT_COLLECTION para suportar
- *   múltiplos ambientes (dev/staging/prod) sem alteração de código.
+ * Nome da coleção Qdrant (deve bater com QDRANT_COLLECTION no .env / painel Cloud).
  */
-const COLLECTION_NAME = 'documentos_pdf';
+const COLLECTION_NAME = process.env.QDRANT_COLLECTION || 'documentos_pdf';
 
 /**
  * Instância singleton do cliente Qdrant.
@@ -66,7 +63,7 @@ function getQdrantClient() {
 }
 
 /**
- * Cria índices de payload no Qdrant para os campos `userId` e `fileId`.
+ * Cria índices de payload no Qdrant para os campos `empresa_id`, `projeto_id` e `file_id`.
  *
  * Índices de payload são necessários para que filtros de busca (must: [...])
  * sejam executados eficientemente — sem eles, o Qdrant faz full scan dos vetores.
@@ -77,15 +74,30 @@ function getQdrantClient() {
  * @param {QdrantClient} client - Instância do cliente Qdrant
  * @returns {Promise<void>}
  */
+function isPayloadIndexAlreadyExistsError(err) {
+  const s = String(err?.message || err?.data?.status?.error || err || '').toLowerCase();
+  return (
+    /already exists|duplicate|already been created|field already|index already/i.test(s) ||
+    err?.status === 409
+  );
+}
+
 async function ensurePayloadIndexes(client) {
-  const fields = ['userId', 'fileId'];
+  const fields = ['empresa_id', 'projeto_id', 'file_id', 'fileId'];
 
   for (const fieldName of fields) {
-    await client.createPayloadIndex(COLLECTION_NAME, {
-      wait: true,          // Aguarda a criação ser confirmada antes de retornar
-      field_name: fieldName,
-      field_schema: 'integer' // userId e fileId são sempre inteiros
-    });
+    try {
+      await client.createPayloadIndex(COLLECTION_NAME, {
+        wait: true,
+        field_name: fieldName,
+        field_schema: 'integer'
+      });
+    } catch (err) {
+      if (isPayloadIndexAlreadyExistsError(err)) {
+        continue;
+      }
+      throw err;
+    }
   }
 }
 
@@ -124,28 +136,53 @@ async function ensureCollectionExists() {
 }
 
 /**
- * Remove todos os vetores de um arquivo específico de um usuário no Qdrant.
+ * Remove todos os vetores de um arquivo específico no Qdrant.
  *
- * Chamado antes de re-indexar um PDF para garantir que vetores antigos (de uploads
- * anteriores do mesmo arquivo) não permaneçam no índice, causando duplicidade
- * nos resultados de busca.
+ * Chamado antes de re-indexar um PDF para garantir que vetores antigos do mesmo
+ * documento não permaneçam no índice, causando duplicidade nos resultados de busca.
  *
- * O filtro duplo (userId + fileId) garante isolamento entre usuários — um usuário
- * não pode deletar vetores de outro mesmo que envie o mesmo fileId.
+ * O filtro base é `file_id` porque o ID do documento é globalmente único no sistema.
  *
- * @param {number|string} userId  - ID do usuário dono dos vetores
  * @param {number|string} fileId  - ID do arquivo cujos vetores serão removidos
  * @returns {Promise<void>}
  */
-async function deleteByUserAndFile(userId, fileId) {
+async function deleteByFile(fileId) {
+  try {
+    const client = getQdrantClient();
+    await client.delete(COLLECTION_NAME, {
+      wait: true,
+      filter: {
+        must: [
+          {
+            should: [
+              { key: 'file_id', match: { value: Number(fileId) } },
+              { key: 'fileId', match: { value: Number(fileId) } }
+            ]
+          }
+        ]
+      }
+    });
+  } catch (err) {
+    console.warn(`[Qdrant] deleteByFile(${fileId}):`, err?.message || err);
+  }
+}
+
+/**
+ * Remove todos os vetores de um projeto no Qdrant (tenant-safe).
+ *
+ * @param {number|string} projetoId
+ * @param {number|string} empresaId
+ * @returns {Promise<void>}
+ */
+async function deleteByProjetoAndEmpresa(projetoId, empresaId) {
   const client = getQdrantClient();
 
   await client.delete(COLLECTION_NAME, {
-    wait: true, // Aguarda confirmação de deleção antes de prosseguir com o upsert
+    wait: true,
     filter: {
       must: [
-        { key: 'userId', match: { value: Number(userId) } },
-        { key: 'fileId', match: { value: Number(fileId) } }
+        { key: 'projeto_id', match: { value: Number(projetoId) } },
+        { key: 'empresa_id', match: { value: Number(empresaId) } }
       ]
     }
   });
@@ -165,49 +202,46 @@ async function deleteByUserAndFile(userId, fileId) {
  * @param {Array<{id: string, vector: number[], payload: object}>} points - Pontos a inserir
  * @returns {Promise<void>}
  */
+/** Lotes menores evitam timeout / limite de corpo em Qdrant Cloud com PDFs grandes. */
+const UPSERT_BATCH_SIZE = Number(process.env.QDRANT_UPSERT_BATCH || 48);
+
 async function upsertChunks(points) {
   const client = getQdrantClient();
 
   if (!Array.isArray(points) || points.length === 0) {
-    return; // Não faz chamada de rede desnecessária para array vazio
+    return;
   }
 
-  await client.upsert(COLLECTION_NAME, {
-    wait: true, // Garante que os vetores estão disponíveis para busca antes de retornar
-    points
-  });
+  const batchSize = Number.isFinite(UPSERT_BATCH_SIZE) && UPSERT_BATCH_SIZE > 0 ? UPSERT_BATCH_SIZE : 48;
+  for (let i = 0; i < points.length; i += batchSize) {
+    const slice = points.slice(i, i + batchSize);
+    await client.upsert(COLLECTION_NAME, {
+      wait: true,
+      points: slice
+    });
+  }
 }
 
 /**
  * Busca semântica no Qdrant: encontra os chunks mais similares à pergunta do usuário.
  *
  * Filtragem de segurança:
- *  - userId: garante isolamento entre usuários (usuário A não vê docs do usuário B)
- *  - fileIds: filtra apenas os arquivos selecionados pelo usuário no frontend
+ *  - empresaId: garante isolamento por tenant no índice vetorial
+ *  - fileIds: restringe a busca apenas aos arquivos selecionados no frontend quando fornecido
  *
  * A similaridade é calculada por distância de Cosseno (configurada na coleção).
  * Retorna os `limit` pontos com maior score de similaridade.
  *
  * @param {object}   params
  * @param {number[]} params.vector   - Vetor da pergunta (gerado pelo embeddingService)
- * @param {number}   params.userId   - ID do usuário (filtro obrigatório de isolamento)
+ * @param {number}   params.empresaId - ID da empresa (filtro obrigatório de isolamento)
  * @param {number[]} [params.fileIds=[]] - IDs dos arquivos a incluir na busca (filtro opcional)
  * @param {number}   [params.limit=3]   - Número máximo de chunks a retornar
  * @returns {Promise<Array<{id: string, score: number, payload: object}>>}
  *   Array de hits ordenados por score decrescente
  */
-async function searchRelevantChunks({ vector, userId, fileIds = [], limit = 3 }) {
+async function searchRelevantChunks({ vector, empresaId, fileIds = [], limit = 3 }) {
   const client = getQdrantClient();
-
-  // Filtro base: userId é sempre obrigatório para isolar dados por usuário
-  const must = [
-    {
-      key: 'userId',
-      match: {
-        value: Number(userId) // Garante tipo inteiro — evita mismatch de tipo no filtro
-      }
-    }
-  ];
 
   // Normaliza e valida os fileIds para evitar injeção de valores inválidos no filtro
   const normalizedFileIds = Array.isArray(fileIds)
@@ -216,31 +250,72 @@ async function searchRelevantChunks({ vector, userId, fileIds = [], limit = 3 })
       .filter((id) => Number.isInteger(id) && id > 0)
     : [];
 
-  if (normalizedFileIds.length > 0) {
-    must.push({
+  const empresaFilter = empresaId != null && empresaId !== ''
+    ? {
+      key: 'empresa_id',
+      match: { value: Number(empresaId) }
+    }
+    : null;
+
+  const fileFilters = normalizedFileIds.length > 0 ? [
+    {
+      key: 'file_id',
+      match: { any: normalizedFileIds }
+    },
+    {
       key: 'fileId',
-      match: {
-        any: normalizedFileIds // Filtra chunks de qualquer um dos arquivos selecionados
-      }
+      match: { any: normalizedFileIds }
+    }
+  ] : [];
+
+  const executeSearch = async (filter) => {
+    const results = await client.search(COLLECTION_NAME, {
+      vector,
+      limit,
+      with_payload: true,
+      filter
     });
+
+    if (Array.isArray(results)) {
+      return results;
+    }
+
+    return Array.isArray(results?.result) ? results.result : [];
+  };
+
+  const searchAttempts = [];
+
+  if (normalizedFileIds.length > 0) {
+    if (empresaFilter) {
+      for (const fileFilter of fileFilters) {
+        searchAttempts.push({ must: [empresaFilter, fileFilter] });
+      }
+    }
+
+    for (const fileFilter of fileFilters) {
+      searchAttempts.push({ must: [fileFilter] });
+    }
+  } else if (empresaFilter) {
+    searchAttempts.push({ must: [empresaFilter] });
+  } else {
+    throw new Error('Nenhum filtro valido fornecido para a busca no Qdrant.');
   }
 
-  const results = await client.search(COLLECTION_NAME, {
-    vector,
-    limit,
-    with_payload: true, // Retorna o payload completo (incluindo o texto do chunk)
-    filter: {
-      must // Todos os filtros em `must` devem ser satisfeitos (AND lógico)
+  for (const filter of searchAttempts) {
+    const hits = await executeSearch(filter);
+    if (hits.length > 0) {
+      return hits;
     }
-  });
+  }
 
-  return results;
+  return [];
 }
 
 module.exports = {
   COLLECTION_NAME,
   ensureCollectionExists,
-  deleteByUserAndFile,
+  deleteByFile,
+  deleteByProjetoAndEmpresa,
   upsertChunks,
   searchRelevantChunks
 };

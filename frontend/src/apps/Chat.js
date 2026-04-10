@@ -37,20 +37,11 @@ import { Form } from "react-bootstrap";
 import { Link, useOutletContext } from "react-router-dom";
 import PerfectScrollbar from "react-perfect-scrollbar";
 import Avatar from "../components/Avatar";
+import { API_URL, uploadProjectDocument } from "../services/api";
 
 // TODO: RedOps Fix — Substituir imagens hardcoded por avatares dinâmicos do perfil do usuário
 import imgUser from "../assets/img/img16.jpg";
 import imgAI from "../assets/img/img14.jpg";
-
-/**
- * URL base da API do backend.
- * Lida de REACT_APP_API_URL (injetada pelo CRA via .env) ou usa '/api' como fallback
- * para funcionar com proxy reverso em produção (Nginx → Node.js).
- *
- * @security Nunca hardcodar a URL completa do backend aqui.
- *   Em produção, REACT_APP_API_URL deve apontar para o domínio real via HTTPS.
- */
-const API_URL = process.env.REACT_APP_API_URL || '/api';
 
 /**
  * Componente Chat — Interface principal do assistente RAG.
@@ -67,6 +58,8 @@ export default function Chat() {
    */
   const outletContext = useOutletContext() || {};
   const selectedPdfIds = outletContext.selectedPdfIds || [];
+  const uploadFolderId = outletContext.uploadFolderId || null;
+  const setFilesReloadCounter = outletContext.setFilesReloadCounter;
 
   /** @type {[Array<{sender: string, text: string, time: string}>, Function]} Histórico de mensagens */
   const [messages, setMessages] = useState([]);
@@ -164,6 +157,10 @@ export default function Chat() {
    */
   const handleFileClick = (e) => {
     e.preventDefault();
+    if (!uploadFolderId) {
+      alert('Selecione um projeto de destino na barra lateral antes de enviar um PDF.');
+      return;
+    }
     fileInputRef.current.click();
   };
 
@@ -172,7 +169,7 @@ export default function Chat() {
    *
    * Fluxo:
    *  1. Usuário seleciona arquivo via input oculto
-   *  2. FormData é construído e enviado para POST /api/files/upload
+   *  2. FormData é construído e enviado para POST /api/projects/upload
    *  3. Backend salva no disco, registra no MySQL e indexa no Qdrant (ragService.ingestPdfFile)
    *  4. Resposta indica sucesso ou falha de indexação (indexingWarning)
    *  5. Mensagem de feedback é adicionada ao chat
@@ -184,28 +181,22 @@ export default function Chat() {
     if (!file) return;
 
     setIsTyping(true);
-    const formData = new FormData();
-    formData.append('file', file);
 
     try {
-      // POST para o backend: salva PDF no disco e dispara pipeline de ingestão RAG
-      const response = await fetch(`${API_URL}/files/upload`, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${token}` },
-        body: formData
-        // Não definir Content-Type — o browser inclui automaticamente o boundary do multipart
-      });
+      const response = await uploadProjectDocument(token, file, uploadFolderId);
 
       const rawBody = await response.text();
       const data = parseJsonSafely(rawBody);
 
       if (response.ok) {
-        // indexingWarning presente = arquivo salvo mas indexação vetorial falhou
         const uploadMessage = data.indexingWarning
           ? `Arquivo "${file.name}" enviado, mas a indexação vetorial falhou. Reenvie o PDF ou use outro arquivo antes de consultar o chat.`
           : `Arquivo "${file.name}" recebido e indexado com sucesso no servidor.`;
 
         setMessages(prev => [...prev, buildChatMessage('bot', uploadMessage)]);
+        if (setFilesReloadCounter) {
+          setFilesReloadCounter(prev => prev + 1);
+        }
       } else {
         throw new Error(data.error || "Falha no upload");
       }
@@ -517,6 +508,15 @@ export default function Chat() {
                 >
                   {`PDFs: ${selectedPdfIds.length}`}
                 </div>
+
+                {uploadFolderId && (
+                  <div
+                    style={{ flexShrink: 0, whiteSpace: 'nowrap', color: '#6c757d', fontSize: '12px', marginLeft: '8px' }}
+                    title={`Upload será enviado para o projeto ${uploadFolderId}`}
+                  >
+                    {`Upload projeto: ${uploadFolderId}`}
+                  </div>
+                )}
 
                 {/*
                   Botão de ação principal:

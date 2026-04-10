@@ -2,8 +2,7 @@ import React, { useState } from "react";
 import { Button, Card, Form, Spinner } from "react-bootstrap";
 import { Link, useNavigate } from "react-router-dom";
 
-// Base da API servida pelo mesmo domínio via Nginx (/api -> backend)
-const API_URL = process.env.REACT_APP_API_URL || '/api';
+import { login } from "../services/api";
 
 export default function Signin() {
   const [email, setEmail] = useState(""); 
@@ -18,11 +17,7 @@ export default function Signin() {
 
     try {
       // Chamada de autenticacao: envia credenciais e recebe JWT + dados do usuario.
-      const response = await fetch(`${API_URL}/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
+      const response = await login(email, password);
 
       const data = await response.json();
 

@@ -43,14 +43,18 @@
  */
 function chunkText(text, options = {}) {
   const chunkSize = Number(options.chunkSize) || 1000;
-  const overlap = Number(options.overlap) || 200;
+  let overlap = Number(options.overlap);
+
+  if (Number.isNaN(overlap)) {
+    overlap = Math.ceil(chunkSize * 0.1);
+  }
 
   // Validação de invariantes: garante que os parâmetros são matematicamente válidos
   if (chunkSize <= 0) {
     throw new Error('chunkSize deve ser maior que zero.');
   }
-  if (overlap < 0 || overlap >= chunkSize) {
-    // overlap >= chunkSize causaria loop infinito (start nunca avançaria)
+  const minOverlap = Math.max(overlap, Math.ceil(chunkSize * 0.1));
+  if (minOverlap < 0 || minOverlap >= chunkSize) {
     throw new Error('overlap deve ser maior ou igual a zero e menor que chunkSize.');
   }
 
@@ -60,23 +64,44 @@ function chunkText(text, options = {}) {
     return []; // Texto vazio — nenhum chunk gerado
   }
 
+  const separators = ['\n\n', '\n', '. ', '? ', '! ', ' ', ''];
   const chunks = [];
   let start = 0;
 
+  const findSplitPosition = (from, to) => {
+    for (const sep of separators) {
+      if (!sep) {
+        continue;
+      }
+      const pos = source.lastIndexOf(sep, to - 1);
+      if (pos >= from) {
+        return pos + sep.length;
+      }
+    }
+    return to;
+  };
+
   while (start < source.length) {
-    const end = Math.min(start + chunkSize, source.length);
-    const slice = source.slice(start, end).trim();
+    const maxEnd = Math.min(start + chunkSize, source.length);
+    let splitPos = maxEnd;
 
-    if (slice) {
-      chunks.push(slice); // Ignora slices que resultam em apenas whitespace após trim
+    if (maxEnd < source.length) {
+      splitPos = findSplitPosition(start, maxEnd);
+      if (splitPos <= start) {
+        splitPos = maxEnd;
+      }
     }
 
-    if (end >= source.length) {
-      break; // Chegou ao final do texto
+    const chunk = source.slice(start, splitPos).trim();
+    if (chunk) {
+      chunks.push(chunk);
     }
 
-    // Avança start subtraindo o overlap para criar sobreposição com o próximo chunk
-    start = end - overlap;
+    if (splitPos >= source.length) {
+      break;
+    }
+
+    start = Math.max(splitPos - minOverlap, start + 1);
   }
 
   return chunks;

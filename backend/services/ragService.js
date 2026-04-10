@@ -31,7 +31,7 @@ const { chunkText } = require('./chunkingService');
 const { generateEmbedding, generateEmbeddings } = require('./embeddingService');
 const {
   ensureCollectionExists,
-  deleteByUserAndFile,
+  deleteByFile,
   upsertChunks,
   searchRelevantChunks
 } = require('./qdrantService');
@@ -64,7 +64,7 @@ function buildPrompt({ question, context }) {
  *
  *  [STEP 2 — CHUNKING]
  *    Divide o texto extraído em janelas deslizantes (sliding window) com overlap.
- *    Parâmetros: chunkSize=1000 chars, overlap=200 chars.
+ *    Parâmetros: chunkSize=1000 chars, overlap=100 chars.
  *    O overlap garante que informações na borda entre chunks não sejam perdidas na busca.
  *
  *  [STEP 3 — VETORIZAÇÃO]
@@ -75,21 +75,22 @@ function buildPrompt({ question, context }) {
  *
  *  [STEP 4 — UPSERT NO QDRANT]
  *    Deleta vetores antigos do mesmo arquivo (evita duplicidade em re-upload) e
- *    insere os novos pontos com payload de metadados (userId, fileId, chunkIndex, text).
+ *    insere os novos pontos com payload de metadados (empresa_id, projeto_id, file_id, chunk_index, text).
  *
  * @param {object} params
- * @param {number|string} params.userId   - ID do usuário dono do arquivo
- * @param {number|string} params.fileId   - ID do registro na tabela `files` do MySQL
- * @param {string}        params.filePath - Caminho absoluto do PDF no disco
- * @param {string}        params.fileName - Nome original do arquivo (para payload)
+ * @param {string|number} params.pdfPath  - Caminho absoluto do PDF no disco
+ * @param {number|string} params.empresaId - ID da empresa do tenant
+ * @param {number|string} params.projetoId - ID do projeto associado ao PDF
+ * @param {number|string} params.fileId    - ID do registro na tabela `documentos` do MySQL
+ * @param {string}        params.fileName  - Nome original do arquivo (para payload)
  * @returns {Promise<{chunkCount: number, fileId: number, fileName: string}>}
  * @throws {Error} Se o texto extraído for vazio ou nenhum chunk for gerado
  */
-async function ingestPdfFile({ userId, fileId, filePath, fileName }) {
+async function ingestPdfFile({ pdfPath, empresaId, projetoId, fileId, fileName, userId = null }) {
   console.log(`[RAG][INGEST] Iniciando indexacao do arquivo fileId=${fileId} nome=${fileName}`);
 
   // STEP 1 — Leitura do arquivo PDF como Buffer binário
-  const dataBuffer = await fs.readFile(filePath);
+  const dataBuffer = await fs.readFile(pdfPath);
   console.log(`[RAG][INGEST] Arquivo lido do disco (${dataBuffer.length} bytes)`);
 
   // Extração de texto puro do PDF via pdf-parse
@@ -102,12 +103,11 @@ async function ingestPdfFile({ userId, fileId, filePath, fileName }) {
     throw new Error('Nao foi possivel extrair texto do PDF para indexacao.');
   }
 
-  // STEP 2 — Chunking: divide o texto em janelas deslizantes com overlap
-  // chunkSize=1000: cada chunk tem até 1000 caracteres
-  // overlap=200: os últimos 200 chars do chunk anterior são repetidos no próximo
+  // STEP 2 — Chunking: divide o texto em janelas deslizantes por limites semânticos
+  // enquanto mantém um overlap mínimo de 10% do tamanho do chunk.
   const chunks = chunkText(extractedText, {
     chunkSize: 1000,
-    overlap: 200
+    overlap: 100
   });
   console.log(`[RAG][INGEST] Chunking concluido (${chunks.length} chunks)`);
 
@@ -124,19 +124,24 @@ async function ingestPdfFile({ userId, fileId, filePath, fileName }) {
   // Garante que a coleção existe com a dimensão correta antes de inserir
   await ensureCollectionExists();
   // Remove vetores antigos do mesmo arquivo para evitar duplicidade em re-indexação
-  await deleteByUserAndFile(userId, fileId);
+  await deleteByFile(fileId);
 
   // Monta os pontos Qdrant: cada ponto = vetor + payload de metadados
   const points = chunks.map((chunk, index) => ({
     id: randomUUID(), // UUID único por ponto — não reutilizado entre re-indexações
     vector: vectors[index],
     payload: {
-      userId: Number(userId),       // Para filtro de busca por usuário
-      fileId: Number(fileId),       // Para filtro de busca por arquivo
+      empresa_id: Number(empresaId),
+      projeto_id: Number(projetoId),
+      file_id: Number(fileId),
+      fileId: Number(fileId),
       fileName: String(fileName || `arquivo-${fileId}`),
-      chunkIndex: index,            // Posição do chunk no documento original
-      text: chunk,                  // Texto original do chunk (retornado na busca)
-      indexedAt: new Date().toISOString() // Auditoria de quando foi indexado
+      chunk_index: index,
+      chunkIndex: index,
+      text: chunk,
+      indexed_at: new Date().toISOString(),
+      indexedAt: new Date().toISOString(),
+      ...(userId != null ? { userId: Number(userId) } : {})
     }
   }));
 
@@ -155,24 +160,24 @@ async function ingestPdfFile({ userId, fileId, filePath, fileName }) {
  * @description Pipeline de recuperação semântica (RAG Retrieve).
  *
  * Converte a pergunta em vetor e busca os chunks mais similares no Qdrant,
- * filtrados por userId e opcionalmente por fileIds específicos.
+ * filtrados por empresaId e opcionalmente por fileIds específicos.
  *
  * Etapas:
  *  [STEP 1] Gera embedding da pergunta (mesmo modelo usado na indexação: MiniLM-L6-v2)
  *  [STEP 2] Garante que a coleção Qdrant existe (idempotente)
- *  [STEP 3] Busca semântica por similaridade de cosseno, filtrada por userId + fileIds
+ *  [STEP 3] Busca semântica por similaridade de cosseno, filtrada por empresaId + fileIds
  *  [STEP 4] Extrai e concatena os textos dos chunks retornados como contexto
  *
  * @param {object}          params
- * @param {string}          params.question - Pergunta do usuário
- * @param {number}          params.userId   - ID do usuário (filtro de isolamento)
- * @param {number[]}        params.fileIds  - IDs dos arquivos a considerar na busca
+ * @param {string}          params.question  - Pergunta do usuário
+ * @param {number}          params.empresaId - ID da empresa do tenant (filtro obrigatório)
+ * @param {number[]}        params.fileIds   - IDs dos arquivos a considerar na busca
  * @param {number}          [params.topK=3] - Número máximo de chunks a recuperar
  * @returns {Promise<{hits: object[], context: string}>}
  *   hits    — Objetos crus retornados pelo Qdrant (incluem score e payload)
  *   context — Texto concatenado dos chunks para uso no prompt
  */
-async function retrieveContext({ question, userId, fileIds, topK = 3 }) {
+async function retrieveContext({ question, empresaId, fileIds, topK = 3 }) {
   console.log('[RAG][RETRIEVE] Iniciando recuperação de contexto...');
 
   // STEP 1 — Embedding da pergunta usando o mesmo modelo da indexação (consistência de espaço vetorial)
@@ -185,11 +190,11 @@ async function retrieveContext({ question, userId, fileIds, topK = 3 }) {
   await ensureCollectionExists();
   console.log('[RAG][RETRIEVE] Step 2 OK: Coleção verificada');
 
-  // STEP 3 — Busca semântica: distância de cosseno, filtros de userId e fileIds
+  // STEP 3 — Busca semântica: distância de cosseno, filtro obrigatório por empresa_id e fileIds opcionais
   console.log('[RAG][RETRIEVE] Step 3: Buscando chunks similares no Qdrant...');
   const hits = await searchRelevantChunks({
     vector: questionEmbedding,
-    userId,
+    empresaId,
     fileIds,
     limit: topK
   });

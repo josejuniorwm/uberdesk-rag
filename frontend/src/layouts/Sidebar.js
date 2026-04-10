@@ -1,3 +1,18 @@
+/**
+ * @file Sidebar.js
+ * @description Componente de navegação lateral que inclui o menu principal e a seção RAG.
+ *
+ * Responsabilidades:
+ *  - Exibir navegação principal do painel.
+ *  - Exibir o componente FileTree com seleção de PDFs para uso no chat.
+ *  - Garantir que apenas documentos do tenant sejam visíveis no frontend.
+ *
+ * Fluxo:
+ *  Rota de navegação selecionada → Sidebar renderiza FileTree → retorna listagem de documentos
+ *
+ * @requires react-router-dom Link, NavLink para navegação
+ * @requires react-perfect-scrollbar Rolagem personalizada do menu lateral
+ */
 import React, { Component } from "react";
 import { Link, NavLink } from "react-router-dom";
 import PerfectScrollbar from "react-perfect-scrollbar";
@@ -36,7 +51,7 @@ export default class Sidebar extends Component {
 
     render() {
         const userData = this.getLoggedUser();
-        const userName = userData?.name || userData?.username || userData?.email || "Usuário";
+        const userName = userData?.nome || userData?.name || userData?.username || userData?.email || "Usuário";
 
         return (
             <div className="sidebar">
@@ -48,6 +63,10 @@ export default class Sidebar extends Component {
                         onUpdateSize={() => this._scrollBarRef.updateScroll()}
                         selectedPdfIds={this.props.selectedPdfIds}
                         setSelectedPdfIds={this.props.setSelectedPdfIds}
+                        uploadFolderId={this.props.uploadFolderId}
+                        setUploadFolderId={this.props.setUploadFolderId}
+                        filesReloadCounter={this.props.filesReloadCounter}
+                        setFilesReloadCounter={this.props.setFilesReloadCounter}
                     />
                 </PerfectScrollbar>
                 <div className="sidebar-footer">
@@ -155,6 +174,10 @@ class SidebarMenu extends Component {
                                 onUpdateSize={this.props.onUpdateSize}
                                 selectedPdfIds={this.props.selectedPdfIds}
                                 setSelectedPdfIds={this.props.setSelectedPdfIds}
+                                uploadFolderId={this.props.uploadFolderId}
+                                setUploadFolderId={this.props.setUploadFolderId}
+                                reloadCounter={this.props.filesReloadCounter}
+                                setFilesReloadCounter={this.props.setFilesReloadCounter}
                             />
                         </li>
                     </ul>

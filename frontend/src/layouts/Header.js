@@ -52,7 +52,7 @@ export default function Header() {
   }
 
   const userData = getLoggedUser();
-  const userName = userData?.name || userData?.username || userData?.email || "Usuário";
+  const userName = userData?.nome || userData?.name || userData?.username || userData?.email || "Usuário";
 
   return (
     <div className="header-main px-3 px-lg-4">
