@@ -560,21 +560,31 @@ app.post('/api/users/invite', authenticateToken, async (req, res) => {
  * até a chamada fetch para a Groq, evitando consumo desnecessário de tokens
  * quando o cliente desconecta.
  *
- * @param {import('express').Request}  req - Corpo: { text?, prompt?, selectedPdfIds?, fileIds? }
+ * @param {import('express').Request}  req - Corpo: { text?, prompt?, selectedPdfIds?, fileIds?, session_id }
  * @param {import('express').Response} res - Resposta: { text: string, answer: string }
  * @security Filtra via req.user.empresaId para garantir isolamento tenant entre empresas.
  */
 const handleChatMessage = async (req, res) => {
   // Normaliza os campos de entrada: suporta 'text' (novo) e 'prompt' (legado)
-  const { text, prompt, selectedPdfIds, fileIds } = req.body;
+  const { text, prompt, selectedPdfIds, fileIds, session_id } = req.body;
   const userPrompt = (text || prompt || '').trim();
 
   // Normaliza os IDs dos PDFs independentemente do campo enviado pelo frontend
   const receivedFileIds = Array.isArray(selectedPdfIds)
     ? selectedPdfIds
     : (Array.isArray(fileIds) ? fileIds : []);
+  const rawSessionId = session_id ?? null;
+  const normalizedSessionId = (rawSessionId === null || rawSessionId === undefined || rawSessionId === '')
+    ? null
+    : Number(rawSessionId);
   const userId = req.user.id; // Injetado pelo middleware authenticateToken
   if (!userPrompt) return res.status(400).json({ error: "Mensagem vazia." });
+  if (normalizedSessionId === null) {
+    return res.status(400).json({ error: 'session_id é obrigatório.' });
+  }
+  if (normalizedSessionId !== null && (!Number.isInteger(normalizedSessionId) || normalizedSessionId <= 0)) {
+    return res.status(400).json({ error: 'session_id inválido.' });
+  }
 
   /**
    * AbortController permite cancelar a requisição para a Groq se o cliente
@@ -602,11 +612,32 @@ const handleChatMessage = async (req, res) => {
 
   try {
     // -----------------------------------------------------------------------
+    // STEP 0 — Validar sessão ativa enviada pelo frontend
+    // -----------------------------------------------------------------------
+    if (normalizedSessionId !== null) {
+      const [sessionRows] = await db.query(
+        'SELECT id FROM sessoes_chat WHERE id = ? AND usuario_id = ? AND empresa_id = ? LIMIT 1',
+        [normalizedSessionId, userId, req.user.empresaId]
+      );
+
+      if (!Array.isArray(sessionRows) || sessionRows.length === 0) {
+        return res.status(403).json({ error: 'Sessão de chat inválida para este usuário.' });
+      }
+    }
+
+    // -----------------------------------------------------------------------
     // STEP 1 — Persistir pergunta do usuário
     // -----------------------------------------------------------------------
     try {
-      await db.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'user', userPrompt]);
+      await db.query(
+        'INSERT INTO messages (user_id, sender, text, session_id) VALUES (?, ?, ?, ?)',
+        [userId, 'user', userPrompt, normalizedSessionId]
+      );
     } catch (insertErr) {
+      if (insertErr?.code === 'ER_BAD_FIELD_ERROR' && normalizedSessionId !== null) {
+        console.error('[CHAT] Coluna de sessão não encontrada na tabela messages:', insertErr.message);
+        return res.status(500).json({ error: 'Coluna session_id ausente na tabela messages. Execute a migração do banco.' });
+      }
       if (insertErr?.errno === 1452 || insertErr?.code === 'ER_NO_REFERENCED_ROW_2' || insertErr?.code === 'ER_NO_REFERENCED_ROW') {
         console.error('[CHAT] FK violation ao inserir message para user_id=', userId, insertErr.message);
         return res.status(403).json({ error: 'Usuário inválido para o chat. Refaça login ou contate o suporte.' });
@@ -697,9 +728,16 @@ const handleChatMessage = async (req, res) => {
     // -----------------------------------------------------------------------
     console.log('[CHAT] Passo 3: Salvando resposta no banco de dados...');
     try {
-      await db.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'bot', aiResponse]);
+      await db.query(
+        'INSERT INTO messages (user_id, sender, text, session_id) VALUES (?, ?, ?, ?)',
+        [userId, 'bot', aiResponse, normalizedSessionId]
+      );
       console.log('[CHAT] Passo 3 OK: Resposta salva no banco');
     } catch (insertErr) {
+      if (insertErr?.code === 'ER_BAD_FIELD_ERROR' && normalizedSessionId !== null) {
+        console.error('[CHAT] Coluna de sessão não encontrada na tabela messages:', insertErr.message);
+        return res.status(500).json({ error: 'Coluna session_id ausente na tabela messages. Execute a migração do banco.' });
+      }
       if (insertErr?.errno === 1452 || insertErr?.code === 'ER_NO_REFERENCED_ROW_2' || insertErr?.code === 'ER_NO_REFERENCED_ROW') {
         console.error('[CHAT] FK violation ao inserir resposta bot para user_id=', userId, insertErr.message);
         return res.status(403).json({ error: 'Usuário inválido para o chat. Refaça login ou contate o suporte.' });
@@ -848,14 +886,185 @@ app.get('/api/files/all', authenticateToken, async (req, res) => {
  */
 app.get('/api/messages', authenticateToken, async (req, res) => {
   try {
+    const sessionIdRaw = req.query.session_id ?? null;
+    const sessionId = sessionIdRaw ? Number(sessionIdRaw) : null;
+    if (!sessionId || !Number.isFinite(sessionId)) {
+      return res.json([]);
+    }
+
     const [rows] = await db.query(
-      'SELECT id, sender, text, created_at FROM messages WHERE user_id = ? ORDER BY created_at ASC',
-      [req.user.id]
+      'SELECT id, sender, text, created_at FROM messages WHERE user_id = ? AND session_id = ? ORDER BY created_at ASC',
+      [req.user.id, sessionId]
     );
     res.json(rows);
   } catch (err) {
     console.error('[MESSAGES/GET] Erro ao carregar histórico de mensagens:', err);
     res.status(500).json({ error: 'Erro ao carregar mensagens.' });
+  }
+});
+
+/**
+ * @route  POST /api/chats
+ * @access Privado
+ * @description Cria uma nova sessão de chat para o usuário autenticado.
+ *              Plano básico: máximo de 5 sessões por usuário.
+ */
+app.post('/api/chats', authenticateToken, async (req, res) => {
+  const userId = Number(req.user.id);
+  const empresaId = Number(req.user.empresaId);
+  const tituloRaw = String(req.body?.titulo || '').trim();
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return res.status(400).json({ error: 'Usuário inválido para criar sessão.' });
+  }
+  if (!Number.isFinite(empresaId) || empresaId <= 0) {
+    return res.status(403).json({ error: 'Conta sem empresa vinculada.' });
+  }
+
+  try {
+    const [countRows] = await db.query(
+      'SELECT COUNT(*) AS total FROM sessoes_chat WHERE usuario_id = ? AND empresa_id = ?',
+      [userId, empresaId]
+    );
+
+    const total = Number(countRows?.[0]?.total || 0);
+    if (total >= 5) {
+      return res.status(403).json({
+        error: 'Limite do plano grátis atingido (Max 5 chats). Faça upgrade para continuar.'
+      });
+    }
+
+    const titulo = tituloRaw || `Novo Chat ${total + 1}`;
+    const [result] = await db.query(
+      'INSERT INTO sessoes_chat (usuario_id, empresa_id, titulo) VALUES (?, ?, ?)',
+      [userId, empresaId, titulo]
+    );
+
+    return res.status(201).json({
+      id: Number(result.insertId),
+      usuario_id: userId,
+      empresa_id: empresaId,
+      titulo,
+      created_at: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error('[CHATS/POST] Erro ao criar sessão de chat:', err);
+    return res.status(500).json({ error: 'Erro ao criar sessão de chat.' });
+  }
+});
+
+/**
+ * @route  GET /api/chats
+ * @access Privado
+ * @description Lista sessões de chat do usuário autenticado (mais recentes primeiro).
+ */
+app.get('/api/chats', authenticateToken, async (req, res) => {
+  const userId = Number(req.user.id);
+  const empresaId = Number(req.user.empresaId);
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return res.status(400).json({ error: 'Usuário inválido para listar sessões.' });
+  }
+  if (!Number.isFinite(empresaId) || empresaId <= 0) {
+    return res.status(403).json({ error: 'Conta sem empresa vinculada.' });
+  }
+
+  try {
+    const [rows] = await db.query(
+      'SELECT id, usuario_id, empresa_id, titulo, created_at FROM sessoes_chat WHERE usuario_id = ? AND empresa_id = ? ORDER BY created_at DESC',
+      [userId, empresaId]
+    );
+    return res.json(rows);
+  } catch (err) {
+    console.error('[CHATS/GET] Erro ao listar sessões de chat:', err);
+    return res.status(500).json({ error: 'Erro ao listar sessões de chat.' });
+  }
+});
+
+/**
+ * @route  GET /api/chats/:id/mensagens
+ * @access Privado
+ * @description Lista mensagens de uma sessão específica do usuário autenticado.
+ */
+app.get('/api/chats/:id/mensagens', authenticateToken, async (req, res) => {
+  const chatId = Number(req.params.id);
+  const userId = Number(req.user.id);
+  const empresaId = Number(req.user.empresaId);
+
+  if (!Number.isFinite(chatId) || chatId <= 0) {
+    return res.status(400).json({ error: 'ID de chat inválido.' });
+  }
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return res.status(400).json({ error: 'Usuário inválido para carregar mensagens.' });
+  }
+
+  if (!Number.isFinite(empresaId) || empresaId <= 0) {
+    return res.status(403).json({ error: 'Conta sem empresa vinculada.' });
+  }
+
+  try {
+    const [sessionRows] = await db.query(
+      'SELECT id FROM sessoes_chat WHERE id = ? AND usuario_id = ? AND empresa_id = ? LIMIT 1',
+      [chatId, userId, empresaId]
+    );
+
+    if (!Array.isArray(sessionRows) || sessionRows.length === 0) {
+      return res.status(404).json({ error: 'Sessão de chat não encontrada.' });
+    }
+
+    const [messageRows] = await db.query(
+      'SELECT id, sender, text, created_at FROM messages WHERE user_id = ? AND session_id = ? ORDER BY created_at ASC',
+      [userId, chatId]
+    );
+    const rows = messageRows;
+
+    const normalized = (Array.isArray(rows) ? rows : []).map((msg) => {
+      const rawSender = String(msg.sender || '').toLowerCase();
+      const sender = rawSender === 'assistant' ? 'bot' : (rawSender === 'user' ? 'user' : 'bot');
+      return {
+        id: Number(msg.id),
+        sender,
+        text: String(msg.text || ''),
+        created_at: msg.created_at
+      };
+    });
+
+    return res.json(normalized);
+  } catch (err) {
+    console.error('[CHATS/MESSAGES/GET] Erro ao carregar mensagens da sessão:', err);
+    return res.status(500).json({ error: 'Erro ao carregar mensagens do chat.' });
+  }
+});
+
+/**
+ * @route  DELETE /api/chats/:id
+ * @access Privado
+ * @description Exclui uma sessão de chat do usuário autenticado.
+ */
+app.delete('/api/chats/:id', authenticateToken, async (req, res) => {
+  const chatId = Number(req.params.id);
+  const userId = Number(req.user.id);
+  const empresaId = Number(req.user.empresaId);
+
+  if (!Number.isFinite(chatId) || chatId <= 0) {
+    return res.status(400).json({ error: 'ID de chat inválido.' });
+  }
+
+  try {
+    const [result] = await db.query(
+      'DELETE FROM sessoes_chat WHERE id = ? AND usuario_id = ? AND empresa_id = ?',
+      [chatId, userId, empresaId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Sessão de chat não encontrada.' });
+    }
+
+    return res.json({ message: 'Sessão de chat removida com sucesso.' });
+  } catch (err) {
+    console.error('[CHATS/DELETE] Erro ao excluir sessão de chat:', err);
+    return res.status(500).json({ error: 'Erro ao excluir sessão de chat.' });
   }
 });
 

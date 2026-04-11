@@ -30,14 +30,14 @@
  * @requires react-bootstrap        Form.Control para o textarea de entrada
  * @requires react-perfect-scrollbar Auto-scroll da janela de mensagens
  */
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import Header from "../layouts/Header";
 import Footer from "../layouts/Footer";
 import { Form } from "react-bootstrap";
 import { Link, useOutletContext } from "react-router-dom";
 import PerfectScrollbar from "react-perfect-scrollbar";
 import Avatar from "../components/Avatar";
-import { API_URL, uploadProjectDocument } from "../services/api";
+import { API_URL, uploadProjectDocument, fetchProjectsList } from "../services/api";
 
 // TODO: RedOps Fix — Substituir imagens hardcoded por avatares dinâmicos do perfil do usuário
 import imgUser from "../assets/img/img16.jpg";
@@ -60,9 +60,16 @@ export default function Chat() {
   const selectedPdfIds = outletContext.selectedPdfIds || [];
   const uploadFolderId = outletContext.uploadFolderId || null;
   const setFilesReloadCounter = outletContext.setFilesReloadCounter;
+  const currentSessionId = outletContext.currentSessionId ?? null;
+  const setCurrentSessionId = outletContext.setCurrentSessionId;
+  const messages = useMemo(
+    () => (Array.isArray(outletContext.messages) ? outletContext.messages : []),
+    [outletContext.messages]
+  );
+  const setMessages = outletContext.setMessages;
 
   /** @type {[Array<{sender: string, text: string, time: string}>, Function]} Histórico de mensagens */
-  const [messages, setMessages] = useState([]);
+  // O estado de mensagens é centralizado no Main para permitir updates pela Sidebar.
 
   /** @type {[string, Function]} Conteúdo atual do textarea de entrada */
   const [inputText, setInputText] = useState("");
@@ -72,6 +79,10 @@ export default function Chat() {
 
   /** @type {[boolean, Function]} true enquanto o LLM está gerando a resposta (após envio da pergunta) */
   const [isGenerating, setIsGenerating] = useState(false);
+
+  /** Dados de projetos/documentos para resolver IDs selecionados em nomes legíveis no rodapé. */
+  const [projectRows, setProjectRows] = useState([]);
+  const [documentRows, setDocumentRows] = useState([]);
 
   /** @type {React.RefObject} Referência ao container de scroll para auto-scroll */
   const scrollRef = useRef(null);
@@ -222,16 +233,26 @@ export default function Chat() {
    * Dependência: [token] — re-executa apenas se o token mudar (ex: login/logout).
    */
   useEffect(() => {
+    let isCancelled = false;
+    const controller = new AbortController();
+
     const loadMessages = async () => {
+      setMessages([]); // Limpa imediatamente ao trocar de sessão
+      if (!currentSessionId) {
+        return;
+      }
+
       try {
-        // GET autenticado para carregar histórico de mensagens do usuário
-        const response = await fetch(`${API_URL}/messages`, {
+        const response = await fetch(`${API_URL}/messages?session_id=${currentSessionId}`, {
+          signal: controller.signal,
+          cache: 'no-store',
           headers: { "Authorization": `Bearer ${token}` }
         });
         const data = await response.json();
 
+        if (isCancelled) return;
+
         if (response.ok) {
-          // Formata as mensagens do banco para o formato interno do estado local
           const formatted = data.map(msg => ({
             sender: msg.sender,
             text: msg.text,
@@ -240,11 +261,69 @@ export default function Chat() {
           setMessages(formatted);
         }
       } catch (err) {
+        if (err?.name === 'AbortError') return;
         console.error("Erro ao carregar mensagens:", err);
       }
     };
-    if (token) loadMessages(); // Não tenta carregar se não houver token (usuário não autenticado)
-  }, [token]);
+    if (token) loadMessages();
+
+    return () => {
+      isCancelled = true;
+      controller.abort();
+    };
+  }, [token, currentSessionId, setMessages]);
+
+
+
+  /**
+   * Carrega projetos/documentos para montar o contexto visual:
+   * [Nome da Pasta] > [Nome do Arquivo]
+   */
+  useEffect(() => {
+    const loadContextRows = async () => {
+      try {
+        const response = await fetchProjectsList(token);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) return;
+
+        const projetos = Array.isArray(data?.projetos) ? data.projetos : [];
+        const documentos = Array.isArray(data?.documentos) ? data.documentos : [];
+
+        setProjectRows(projetos);
+        setDocumentRows(documentos);
+      } catch (err) {
+        console.error("Erro ao carregar contexto de arquivos do chat:", err);
+      }
+    };
+
+    if (token) {
+      loadContextRows();
+    }
+  }, [token, outletContext.filesReloadCounter]);
+
+  const selectedContextItems = selectedPdfIds
+    .map((id) => {
+      const numericId = Number(id);
+      const doc = documentRows.find((d) => Number(d.id) === numericId);
+      if (!doc) {
+        return { key: `doc-${id}`, text: `Arquivo #${id}` };
+      }
+
+      const folderId = Number(doc.projeto_id ?? doc.pasta_id ?? doc.projetoId);
+      const folder = projectRows.find((p) => Number(p.id) === folderId);
+      const folderName = folder?.nome || folder?.name || `Pasta #${folderId}`;
+      const fileName = doc?.nome_arquivo || doc?.name || `Arquivo #${id}`;
+
+      return {
+        key: `doc-${numericId}`,
+        text: `📁 ${folderName} > 📄 ${fileName}`
+      };
+    })
+    .filter(Boolean);
+
+  const uploadFolderName = projectRows.find((p) => Number(p.id) === Number(uploadFolderId))?.nome
+    || projectRows.find((p) => Number(p.id) === Number(uploadFolderId))?.name
+    || (uploadFolderId ? `Pasta #${uploadFolderId}` : '');
 
   // ---------------------------------------------------------------------------
   // ENVIO DE MENSAGEM (PIPELINE RAG COMPLETO)
@@ -286,6 +365,44 @@ export default function Chat() {
       .map((id) => Number(id))
       .filter((id) => Number.isInteger(id) && id > 0);
 
+    let activeSessionId = Number(currentSessionId);
+    if (!Number.isInteger(activeSessionId) || activeSessionId <= 0) {
+      activeSessionId = null;
+    }
+
+    if (!activeSessionId) {
+      try {
+        const createSessionResponse = await fetch(`${API_URL}/chats`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ titulo: `Chat ${new Date().toLocaleString()}` })
+        });
+
+        const createSessionBody = await createSessionResponse.text();
+        const createSessionData = parseJsonSafely(createSessionBody);
+
+        if (!createSessionResponse.ok) {
+          throw new Error(createSessionData.error || 'Não foi possível criar uma sessão de chat para enviar a mensagem.');
+        }
+
+        activeSessionId = Number(createSessionData.id);
+        if (!Number.isInteger(activeSessionId) || activeSessionId <= 0) {
+          throw new Error('A API retornou uma sessão inválida.');
+        }
+
+        if (typeof setCurrentSessionId === 'function') {
+          setCurrentSessionId(activeSessionId);
+        }
+      } catch (sessionError) {
+        console.error('Erro ao criar sessão antes de enviar mensagem:', sessionError);
+        setMessages(prev => [...prev, buildChatMessage('bot', 'Não foi possível iniciar uma sessão de chat. Tente novamente.')]);
+        return;
+      }
+    }
+
     const userMsgText = inputText.trim();
     setInputText("");
     setIsTyping(true);
@@ -315,7 +432,8 @@ export default function Chat() {
         },
         body: JSON.stringify({
           text: userMsgText,
-          selectedPdfIds: normalizedPdfIds
+          selectedPdfIds: normalizedPdfIds,
+          session_id: activeSessionId
         })
       });
 
@@ -405,9 +523,9 @@ export default function Chat() {
   return (
     <React.Fragment>
       <Header />
-      <div className="main main-app p-3 p-lg-4">
-        <div className="chat-panel msg-show no-chat-sidebar">
-          <div className="chat-body">
+      <div className="main main-app p-3 p-lg-4" style={{ height: '100dvh', minHeight: '100dvh' }}>
+        <div className="chat-panel msg-show no-chat-sidebar" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div className="chat-body" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
 
             {/* Cabeçalho do Chat — exibe status dinâmico baseado no estado de geração */}
             <div className="chat-body-header">
@@ -425,6 +543,7 @@ export default function Chat() {
             <PerfectScrollbar
               className="chat-body-content"
               containerRef={(ref) => (scrollRef.current = ref)}
+              style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}
             >
               {messages.map((msg, index) => (
                 // key por índice — aceitável para lista append-only sem reordenação
@@ -441,7 +560,49 @@ export default function Chat() {
             </PerfectScrollbar>
 
             {/* Rodapé de Entrada — Área de composição de mensagem */}
-            <div className="chat-body-footer" style={{ borderTop: '1px solid #e2e5ec', padding: '10px 15px', backgroundColor: '#fff' }}>
+            <div
+              className="chat-body-footer"
+              style={{
+                borderTop: '1px solid #e2e5ec',
+                padding: '10px 15px',
+                paddingBottom: 'env(safe-area-inset-bottom, 15px)',
+                backgroundColor: '#fff',
+                flexShrink: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'stretch',
+                gap: '8px',
+                height: 'auto',
+                minHeight: '60px'
+              }}
+            >
+              <div
+                style={{
+                  width: '100%',
+                  color: '#6c757d',
+                  fontSize: '12px',
+                  lineHeight: 1.35,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '4px',
+                  paddingBottom: '8px'
+                }}
+              >
+                {selectedContextItems.length > 0 ? (
+                  selectedContextItems.map((item) => (
+                    <div key={item.key} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.text}>
+                      {item.text}
+                    </div>
+                  ))
+                ) : uploadFolderName ? (
+                  <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`📁 ${uploadFolderName}`}>
+                    {`📁 ${uploadFolderName}`}
+                  </div>
+                ) : (
+                  <div>Nenhum arquivo selecionado.</div>
+                )}
+              </div>
+
               <div className="d-flex align-items-end w-100" style={{ gap: '8px' }}>
 
                 {/* Input de arquivo oculto — acionado via handleFileClick no ícone de anexo */}
@@ -463,13 +624,10 @@ export default function Chat() {
                     padding: '6px 10px',
                     minHeight: '40px',
                     maxHeight: '132px',
-                    backgroundColor: '#f8f9fc'
+                    backgroundColor: '#f8f9fc',
+                    margin: 0
                   }}
                 >
-                  {/* Botão de anexo — desabilitado durante geração para evitar uploads concorrentes */}
-                  <Link to="#" className="text-secondary p-1" onClick={isGenerating ? (e) => e.preventDefault() : handleFileClick} style={{ fontSize: '20px', textDecoration: 'none', pointerEvents: isGenerating ? 'none' : 'auto', opacity: isGenerating ? 0.5 : 1 }}>
-                    <i className="ri-attachment-2"></i>
-                  </Link>
 
                   {/* Textarea com resize automático — Enter envia, Shift+Enter quebra linha */}
                   <Form.Control
@@ -500,23 +658,6 @@ export default function Chat() {
                     }}
                   />
                 </div>
-
-                {/* Indicador do número de PDFs selecionados — debug / UX feedback */}
-                <div
-                  style={{ flexShrink: 0, whiteSpace: 'nowrap', color: '#6c757d', fontSize: '12px' }}
-                  title={selectedPdfIds.length ? `IDs: ${selectedPdfIds.join(', ')}` : 'Nenhum PDF selecionado'}
-                >
-                  {`PDFs: ${selectedPdfIds.length}`}
-                </div>
-
-                {uploadFolderId && (
-                  <div
-                    style={{ flexShrink: 0, whiteSpace: 'nowrap', color: '#6c757d', fontSize: '12px', marginLeft: '8px' }}
-                    title={`Upload será enviado para o projeto ${uploadFolderId}`}
-                  >
-                    {`Upload projeto: ${uploadFolderId}`}
-                  </div>
-                )}
 
                 {/*
                   Botão de ação principal:

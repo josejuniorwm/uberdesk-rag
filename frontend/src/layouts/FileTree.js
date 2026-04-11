@@ -27,7 +27,7 @@ import {
 /** Ícones na sidebar escura: contraste sem quebrar o tema. */
 const actionIconStyle = {
     color: '#475569',
-    fontSize: '16px',
+    fontSize: '13px',
     fontWeight: 700,
     display: 'inline-flex',
     alignItems: 'center',
@@ -434,8 +434,8 @@ const FileTree = ({
         border: '1px solid #cbd5e1',
         borderRadius: '4px',
         cursor: 'pointer',
-        padding: '0 5px',
-        fontSize: '13px',
+        padding: '0 4px',
+        fontSize: '11px',
         lineHeight: 1,
         display: 'flex',
         alignItems: 'center',
@@ -444,8 +444,8 @@ const FileTree = ({
         visibility: 'visible',
         opacity: 1,
         transition: 'background-color 120ms ease, transform 120ms ease',
-        minWidth: '28px',
-        height: '26px'
+        minWidth: '22px',
+        height: '21px'
     };
 
     const treeRowStyle = {
@@ -750,19 +750,19 @@ const FileTree = ({
                                                 </div>
 
                                                 {/* Lado Direito: Botões de Ação (sempre visíveis) */}
-                                                <div style={{ display: 'flex', gap: '10px', marginLeft: 'auto' }} onClick={(e) => e.stopPropagation()}>
+                                                <div style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }} onClick={(e) => e.stopPropagation()}>
                                                     <button
                                                         type="button"
                                                         onClick={() => handleRenameFile(child)}
                                                         onMouseEnter={() => setHoveredActionId(`rename-file-${child.id}`)}
                                                         onMouseLeave={() => setHoveredActionId(null)}
-                                                        style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+                                                        style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, lineHeight: 1 }}
                                                     >
                                                         <i
                                                             className="ri-edit-line"
                                                             style={{
                                                                 color: hoveredActionId === `rename-file-${child.id}` ? '#55141b' : '#475569',
-                                                                fontSize: '16px'
+                                                                fontSize: '13px'
                                                             }}
                                                         ></i>
                                                     </button>
@@ -771,13 +771,13 @@ const FileTree = ({
                                                         onClick={() => handleDeleteFile(child.id, child.nome_arquivo)}
                                                         onMouseEnter={() => setHoveredActionId(`delete-file-${child.id}`)}
                                                         onMouseLeave={() => setHoveredActionId(null)}
-                                                        style={{ border: 'none', background: 'none', cursor: 'pointer' }}
+                                                        style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, lineHeight: 1 }}
                                                     >
                                                         <i
                                                             className="ri-delete-bin-line"
                                                             style={{
                                                                 color: hoveredActionId === `delete-file-${child.id}` ? '#55141b' : '#be123c',
-                                                                fontSize: '16px'
+                                                                fontSize: '13px'
                                                             }}
                                                         ></i>
                                                     </button>

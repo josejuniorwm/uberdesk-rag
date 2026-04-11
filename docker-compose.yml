@@ -135,6 +135,14 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - WDS_SOCKET_PORT=0  # Fix para WebSocket do HMR (Hot Module Replacement) atrás de proxy reverso
+      - WDS_SOCKET_PORT=0
+      - CHOKIDAR_USEPOLLING=true # Força o React a escutar mudanças nos arquivos (Essencial pro Docker)
+      - WATCHPACK_POLLING=true   # Reforço de escuta para versões mais novas do Webpack
+      - DANGEROUSLY_DISABLE_HOST_CHECK=true
     depends_on:
       - backend
+    volumes:
+      # O "Pulo do Gato": Espelha a sua pasta local para dentro do container (/app)
+      - ./frontend:/app
+      # Protege a pasta node_modules do container para não ser sobrescrita pelo seu Linux local
+      - /app/node_modules

@@ -20,6 +20,8 @@ export default function Main() {
   const [selectedPdfIds, setSelectedPdfIds] = useState([]);
   const [uploadFolderId, setUploadFolderId] = useState(null);
   const [filesReloadCounter, setFilesReloadCounter] = useState(0);
+  const [currentSessionId, setCurrentSessionId] = useState(null);
+  const [messages, setMessages] = useState([]);
 
   const offsets = ["/apps/email", "/apps/calendar"];
   const { pathname } = useLocation();
@@ -43,6 +45,9 @@ export default function Main() {
         setUploadFolderId={setUploadFolderId}
         filesReloadCounter={filesReloadCounter}
         setFilesReloadCounter={setFilesReloadCounter}
+        currentSessionId={currentSessionId}
+        setCurrentSessionId={setCurrentSessionId}
+        setMessages={setMessages}
       />
       <Outlet context={{
         selectedPdfIds,
@@ -50,7 +55,11 @@ export default function Main() {
         uploadFolderId,
         setUploadFolderId,
         filesReloadCounter,
-        setFilesReloadCounter
+        setFilesReloadCounter,
+        currentSessionId,
+        setCurrentSessionId,
+        messages,
+        setMessages
       }} />
     </React.Fragment>
   )
