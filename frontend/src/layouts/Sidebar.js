@@ -95,13 +95,17 @@ class SidebarMenu extends Component {
 
     state = {
         chatSessions: [],
-        chatsLoading: false
+        chatsLoading: false,
+        renamingChatId: null,
+        renameChatDraft: '',
+        savingChatId: null
     };
 
     componentDidMount() {
         this.loadChatSessions();
     }
 
+    // Atualiza a altura do PerfectScrollbar depois de mudanças na árvore ou no histórico.
     requestUpdateSize = () => {
         if (typeof this.props.onUpdateSize === 'function') {
             this.props.onUpdateSize();
@@ -110,6 +114,8 @@ class SidebarMenu extends Component {
 
     getToken = () => localStorage.getItem("token");
 
+    // Carrega as mensagens da sessão selecionada e descarta respostas atrasadas
+    // quando o usuário troca de chat rapidamente.
     loadChatMessages = async (chatId) => {
         const token = this.getToken();
         if (!token || !chatId) return;
@@ -152,6 +158,7 @@ class SidebarMenu extends Component {
         }
     }
 
+    // Lista o histórico resumido exibido na sidebar.
     loadChatSessions = async () => {
         const token = this.getToken();
         if (!token) return;
@@ -179,6 +186,70 @@ class SidebarMenu extends Component {
         }
     }
 
+    startRenamingChat = (chat) => {
+        this.setState({
+            renamingChatId: Number(chat.id),
+            renameChatDraft: String(chat.titulo || '')
+        }, this.requestUpdateSize);
+    }
+
+    // Cancela a edição inline e restaura o item do histórico ao modo normal.
+    cancelRenamingChat = () => {
+        this.setState({
+            renamingChatId: null,
+            renameChatDraft: '',
+            savingChatId: null
+        }, this.requestUpdateSize);
+    }
+
+    // Persiste o novo título do chat sem alterar a sessão ativa nem as mensagens carregadas.
+    handleRenameChatSave = async (chatId) => {
+        const token = this.getToken();
+        if (!token) return;
+
+        const titulo = String(this.state.renameChatDraft || '').trim();
+        if (!titulo) {
+            alert('Informe um nome para o chat.');
+            return;
+        }
+
+        this.setState({ savingChatId: Number(chatId) });
+
+        try {
+            const response = await fetch(`${API_URL}/chats/${chatId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`
+                },
+                body: JSON.stringify({ titulo })
+            });
+
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                alert(data.error || 'Não foi possível renomear o chat.');
+                this.setState({ savingChatId: null });
+                return;
+            }
+
+            this.setState((prev) => ({
+                chatSessions: prev.chatSessions.map((chat) => (
+                    Number(chat.id) === Number(chatId)
+                        ? { ...chat, titulo }
+                        : chat
+                )),
+                renamingChatId: null,
+                renameChatDraft: '',
+                savingChatId: null
+            }), this.requestUpdateSize);
+        } catch (err) {
+            console.error('[Sidebar/Chats] Erro ao renomear chat:', err);
+            this.setState({ savingChatId: null });
+            alert('Erro de conexão ao renomear chat.');
+        }
+    }
+
+    // Cria uma nova sessão vazia e limpa a tela antes da primeira mensagem.
     handleCreateChat = async (e) => {
         e.preventDefault();
         const token = this.getToken();
@@ -237,6 +308,8 @@ class SidebarMenu extends Component {
             alert(`Erro de conexão: ${err.message || 'Erro desconhecido ao criar novo chat'}`);
         }
     }
+
+    // Exclui a sessão do histórico; se ela estiver aberta, a UI também é zerada.
     handleDeleteChat = async (chatId, chatTitle) => {
         const token = this.getToken();
         if (!token) return;
@@ -260,6 +333,7 @@ class SidebarMenu extends Component {
                 // Se o chat excluído era o ativo, limpa a seleção
                 if (this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chatId)) {
                     if (this.props.setCurrentSessionId) this.props.setCurrentSessionId(null);
+                    if (typeof this.props.setMessages === 'function') this.props.setMessages([]);
                 }
             });
         } catch (err) {
@@ -334,7 +408,17 @@ class SidebarMenu extends Component {
     }
 
     render() {
-        const { chatSessions, chatsLoading } = this.state;
+        const { chatSessions, chatsLoading, renamingChatId, renameChatDraft, savingChatId } = this.state;
+        const iconButtonStyle = {
+            border: 'none',
+            background: 'none',
+            cursor: 'pointer',
+            padding: 0,
+            lineHeight: 1,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+        };
 
         return (
             <React.Fragment>
@@ -394,7 +478,7 @@ class SidebarMenu extends Component {
                         {!chatsLoading && chatSessions.map((chat) => (
                             <li key={chat.id} className="nav-item" style={{ marginBottom: '2px' }}>
                                     <div
-                                        onClick={async () => {
+                                        onClick={renamingChatId === Number(chat.id) ? undefined : async () => {
                                             if (typeof this.props.setMessages === 'function') {
                                                 this.props.setMessages([]);
                                             }
@@ -405,37 +489,108 @@ class SidebarMenu extends Component {
                                         }}
                                         style={{
                                             display: 'flex', alignItems: 'center', gap: '6px', padding: '4px 8px', borderRadius: '6px',
-                                            cursor: 'pointer',
+                                            cursor: renamingChatId === Number(chat.id) ? 'default' : 'pointer',
                                             backgroundColor: this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chat.id) ? '#f1f5f9' : 'transparent'
                                         }}
                                     >
                                         <i className="ri-message-3-line" style={{ fontSize: '14px', color: this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chat.id) ? '#be123c' : '#6b7280', marginRight: 0, width: 'auto' }}></i>
-                                    <span
-                                        style={{
-                                            flex: 1,
-                                            minWidth: 0,
-                                            overflow: 'hidden',
-                                            textOverflow: 'ellipsis',
-                                            whiteSpace: 'nowrap',
-                                                color: this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chat.id) ? '#be123c' : '#334155',
-                                                fontWeight: this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chat.id) ? '600' : 'normal',
-                                            fontSize: '12px'
-                                        }}
-                                        title={chat.titulo}
-                                    >
-                                        {chat.titulo}
-                                    </span>
-                                    <button
-                                        type="button"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            this.handleDeleteChat(chat.id, chat.titulo);
-                                        }}
-                                        style={{ border: 'none', background: 'none', cursor: 'pointer', padding: 0, lineHeight: 1 }}
-                                        title="Excluir chat"
-                                    >
-                                        <i className="ri-delete-bin-line" style={{ fontSize: '13px', color: '#be123c' }}></i>
-                                    </button>
+                                    {renamingChatId === Number(chat.id) ? (
+                                        <>
+                                            <input
+                                                type="text"
+                                                value={renameChatDraft}
+                                                onClick={(e) => e.stopPropagation()}
+                                                onChange={(e) => this.setState({ renameChatDraft: e.target.value })}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                        e.preventDefault();
+                                                        this.handleRenameChatSave(chat.id);
+                                                    }
+                                                    if (e.key === 'Escape') {
+                                                        e.preventDefault();
+                                                        this.cancelRenamingChat();
+                                                    }
+                                                }}
+                                                disabled={savingChatId === Number(chat.id)}
+                                                maxLength={120}
+                                                autoFocus
+                                                style={{
+                                                    flex: 1,
+                                                    minWidth: 0,
+                                                    border: '1px solid #cbd5e1',
+                                                    borderRadius: '4px',
+                                                    padding: '2px 6px',
+                                                    fontSize: '12px',
+                                                    color: '#334155',
+                                                    background: '#fff'
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    this.handleRenameChatSave(chat.id);
+                                                }}
+                                                style={iconButtonStyle}
+                                                title="Salvar nome do chat"
+                                                disabled={savingChatId === Number(chat.id)}
+                                            >
+                                                <i className="ri-check-line" style={{ fontSize: '13px', color: '#198754' }}></i>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    this.cancelRenamingChat();
+                                                }}
+                                                style={iconButtonStyle}
+                                                title="Cancelar edição do chat"
+                                                disabled={savingChatId === Number(chat.id)}
+                                            >
+                                                <i className="ri-close-line" style={{ fontSize: '13px', color: '#6b7280' }}></i>
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span
+                                                style={{
+                                                    flex: 1,
+                                                    minWidth: 0,
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap',
+                                                    color: this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chat.id) ? '#be123c' : '#334155',
+                                                    fontWeight: this.props.currentSessionId && Number(this.props.currentSessionId) === Number(chat.id) ? '600' : 'normal',
+                                                    fontSize: '12px'
+                                                }}
+                                                title={chat.titulo}
+                                            >
+                                                {chat.titulo}
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    this.startRenamingChat(chat);
+                                                }}
+                                                style={iconButtonStyle}
+                                                title="Renomear chat"
+                                            >
+                                                <i className="ri-edit-line" style={{ fontSize: '13px', color: '#475569' }}></i>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    this.handleDeleteChat(chat.id, chat.titulo);
+                                                }}
+                                                style={iconButtonStyle}
+                                                title="Excluir chat"
+                                            >
+                                                <i className="ri-delete-bin-line" style={{ fontSize: '13px', color: '#be123c' }}></i>
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
                             </li>
                         ))}

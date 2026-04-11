@@ -5,6 +5,8 @@
 
 export const API_URL = process.env.REACT_APP_API_URL || '/api';
 
+// Header helper único para manter o envio de Bearer token consistente
+// nas rotas protegidas consumidas pelo frontend.
 const authHeader = (token) => (token ? { Authorization: `Bearer ${token}` } : {});
 
 /**

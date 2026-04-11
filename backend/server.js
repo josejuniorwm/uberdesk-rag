@@ -982,6 +982,55 @@ app.get('/api/chats', authenticateToken, async (req, res) => {
 });
 
 /**
+ * @route  PUT /api/chats/:id
+ * @access Privado
+ * @description Renomeia uma sessão de chat do usuário autenticado.
+ */
+app.put('/api/chats/:id', authenticateToken, async (req, res) => {
+  const chatId = Number(req.params.id);
+  const userId = Number(req.user.id);
+  const empresaId = Number(req.user.empresaId);
+  const titulo = String(req.body?.titulo || '').trim();
+
+  if (!Number.isFinite(chatId) || chatId <= 0) {
+    return res.status(400).json({ error: 'ID de chat inválido.' });
+  }
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return res.status(400).json({ error: 'Usuário inválido para renomear sessão.' });
+  }
+
+  if (!Number.isFinite(empresaId) || empresaId <= 0) {
+    return res.status(403).json({ error: 'Conta sem empresa vinculada.' });
+  }
+
+  if (!titulo) {
+    return res.status(400).json({ error: 'O título do chat é obrigatório.' });
+  }
+
+  try {
+    const [result] = await db.query(
+      'UPDATE sessoes_chat SET titulo = ? WHERE id = ? AND usuario_id = ? AND empresa_id = ?',
+      [titulo, chatId, userId, empresaId]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Sessão de chat não encontrada.' });
+    }
+
+    return res.json({
+      id: chatId,
+      usuario_id: userId,
+      empresa_id: empresaId,
+      titulo
+    });
+  } catch (err) {
+    console.error('[CHATS/PUT] Erro ao renomear sessão de chat:', err);
+    return res.status(500).json({ error: 'Erro ao renomear sessão de chat.' });
+  }
+});
+
+/**
  * @route  GET /api/chats/:id/mensagens
  * @access Privado
  * @description Lista mensagens de uma sessão específica do usuário autenticado.

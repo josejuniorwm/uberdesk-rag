@@ -7,6 +7,7 @@ O **Uberdesk RAG SaaS** é uma plataforma de Retrieval-Augmented Generation (RAG
 ### Funcionalidades Principais
 - **Ingestão de PDFs**: Upload e processamento automático de documentos PDF com extração de texto e indexação vetorial
 - **Chat Isolado por Empresa**: Conversas baseadas exclusivamente nos documentos da empresa do usuário
+- **Sessões de Chat Persistentes**: Criação, listagem, abertura, renomeação e exclusão de chats salvos
 - **Gerenciamento de Projetos**: Estrutura hierárquica de projetos dentro de empresas
 - **Autenticação JWT**: Sistema de login seguro com tokens de 7 dias
 - **Pipeline RAG Completo**: Embedding local, busca semântica no Qdrant e geração de respostas via Groq API
@@ -52,9 +53,35 @@ O sistema implementa **3 camadas de segurança** para garantir isolamento comple
   - `GET /api/projects/list` - lista projetos/documentos acessíveis ao usuário
   - `POST /api/projects/upload` - upload de PDFs com ingestão automática no RAG
   - `PATCH /api/projects/rename/:id` e `DELETE /api/projects/:id` - operações CRUD com isolamento
-- **Rotas de Chat**: `POST /api/chat` - pipeline RAG completo (embedding → Qdrant → Groq)
+- **Rotas de Sessões de Chat**:
+   - `POST /api/chats` - cria uma sessão vazia para o usuário autenticado
+   - `GET /api/chats` - lista sessões do usuário, mais recentes primeiro
+   - `PUT /api/chats/:id` - renomeia o título de uma sessão existente
+   - `GET /api/chats/:id/mensagens` - carrega o histórico de uma sessão específica
+   - `DELETE /api/chats/:id` - remove a sessão e seu acesso pelo usuário
+- **Rotas de Chat**: `POST /api/chat` - pipeline RAG completo (embedding → Qdrant → Groq) com `session_id` obrigatório
+- **Rotas de Histórico**: `GET /api/messages?session_id=...` - leitura direta das mensagens da sessão ativa
 - **Middleware**: `authenticateToken` para proteção de rotas, isolamento simplificado por empresa
 - **Pool MySQL**: conexão com banco relacional usando credenciais do Docker Compose
+
+### layouts/Main.js (Orquestração de Estado Compartilhado)
+**Localização**: `/frontend/src/layouts/Main.js`
+
+**Responsabilidades**:
+- Centralizar o estado compartilhado entre sidebar e tela do chat
+- Propagar via `Outlet context` os estados `selectedPdfIds`, `uploadFolderId`, `currentSessionId` e `messages`
+- Garantir que a troca de sessão, seleção de PDFs e upload reflitam imediatamente no componente de chat
+
+### layouts/Sidebar.js (Documentos + Histórico de Chats)
+**Localização**: `/frontend/src/layouts/Sidebar.js`
+
+**Responsabilidades**:
+- Renderizar a árvore de projetos/documentos via `FileTree`
+- Exibir o histórico de chats do usuário autenticado
+- Criar um novo chat e limpar a tela antes da primeira mensagem
+- Abrir sessões existentes e carregar suas mensagens
+- Renomear sessões via edição inline no histórico
+- Excluir sessões e limpar a sessão ativa quando necessário
 
 ### services/ragService.js (Pipeline RAG)
 **Localização**: `/backend/services/ragService.js`
@@ -97,32 +124,50 @@ O sistema implementa **3 camadas de segurança** para garantir isolamento comple
 - Status: `pendente`, `indexado`, `erro_indexacao`
 - Vinculados a projetos, herdando isolamento multi-tenant
 
+**sessoes_chat**
+- `id`, `usuario_id`, `empresa_id`, `titulo`, `created_at`
+- Representa a conversa lógica exibida no histórico lateral
+- Cada sessão pertence a um usuário e a uma empresa
+
 **messages** (histórico de chat)
-- `id`, `user_id`, `empresa_id`, `sender`, `text`
-- Isoladas por empresa para compliance e privacidade
+- `id`, `user_id`, `sender`, `text`, `session_id`, `created_at`
+- Cada mensagem pertence a uma sessão salva em `sessoes_chat`
+- Usadas tanto no carregamento por sessão quanto no histórico do chat ativo
 
 ### Isolamento por Queries
-Todas as operações são filtradas simplesmente por `empresa_id = ?`.
+As operações de tenant usam `empresa_id = ?`; as mensagens também exigem vínculo válido com `session_id` e `user_id`.
 
 ## Frontend
 
 ### Estrutura Geral
 - **App.js**: Roteamento com proteção via `RequireAuth`, rotas públicas (login) vs protegidas
-- **Chat.js**: Interface principal de conversação RAG
-- **ProjectTree**: Componente de navegação de projetos/documentos (não mostrado no código fornecido)
+- **Main.js**: Layout raiz autenticado que mantém o estado compartilhado da experiência RAG
+- **Sidebar.js**: Navegação lateral com FileTree e histórico de chats
+- **Chat.js**: Interface principal de conversação RAG e renderização das mensagens
+- **FileTree.js**: Navegação de projetos/documentos, upload e renomeação de pastas/arquivos
+- **services/api.js**: Cliente HTTP centralizado para projetos e documentos
 
 ### Interação com Projetos e Documentos
 - **Seleção de PDFs**: Usuário marca documentos na sidebar via `selectedPdfIds` (contexto compartilhado)
-- **Upload**: PDFs enviados para projeto selecionado (`uploadProjectId`) via `POST /api/projects/upload`
+- **Upload**: PDFs enviados para a pasta/projeto selecionado (`uploadFolderId`) via `POST /api/projects/upload`
 - **Feedback Visual**: Status de indexação mostrado no chat após upload
 - **Isolamento UI**: Apenas projetos/documentos da empresa são exibidos
 
 ### Fluxo de Chat
 1. **Validação**: Verifica token JWT, PDFs selecionados, texto não vazio
-2. **Envio Otimista**: Exibe mensagem do usuário imediatamente
-3. **API Call**: `POST /api/chat` com `text` e `selectedPdfIds`
-4. **Resposta**: Exibe resposta do bot ou trata erros (sem contexto, falha na API)
-5. **Cancelamento**: AbortController permite interromper geração em andamento
+2. **Garantia de Sessão**: Se não houver `currentSessionId`, o frontend cria uma nova sessão via `POST /api/chats`
+3. **Envio Otimista**: Exibe mensagem do usuário imediatamente
+4. **API Call**: `POST /api/chat` com `text`, `selectedPdfIds` e `session_id`
+5. **Persistência**: Backend grava pergunta e resposta em `messages` usando o `session_id` ativo
+6. **Resposta**: Exibe resposta do bot ou trata erros (sem contexto, falha na API)
+7. **Cancelamento**: AbortController permite interromper geração em andamento
+
+### Fluxo do Histórico de Chats
+1. **Listagem**: A sidebar carrega sessões via `GET /api/chats`
+2. **Novo Chat**: O botão `+ Novo Chat` cria a sessão, limpa `messages` e define `currentSessionId`
+3. **Abertura de Sessão**: Ao clicar em um item do histórico, a sidebar carrega `GET /api/chats/:id/mensagens`
+4. **Renomeação**: O botão de lápis abre edição inline e persiste via `PUT /api/chats/:id`
+5. **Exclusão**: O botão de lixeira remove a sessão via `DELETE /api/chats/:id` e limpa a tela se ela estava ativa
 
 ## Fluxo de Dados Completo
 
@@ -144,8 +189,9 @@ Todas as operações são filtradas simplesmente por `empresa_id = ?`.
 
 4. **Consulta do Chat (Frontend → Backend)**:
    - Usuário digita pergunta, seleciona PDFs na sidebar
-   - `POST /api/chat` com `text` e `selectedPdfIds`
-   - Validação: usuário autenticado, PDFs selecionados pertencem ao tenant
+   - Frontend garante que exista uma sessão ativa em `sessoes_chat`
+   - `POST /api/chat` com `text`, `selectedPdfIds` e `session_id`
+   - Validação: usuário autenticado, PDFs selecionados pertencem ao tenant e a sessão pertence ao usuário/tenant
 
 5. **Recuperação de Contexto (Backend → Qdrant)**:
    - `ragService.retrieveContext()`: embedding da pergunta → busca semântica filtrada
@@ -158,13 +204,33 @@ Todas as operações são filtradas simplesmente por `empresa_id = ?`.
    - API call para Groq com AbortController para cancelamento
 
 7. **Persistência e Resposta (Backend → MySQL → Frontend)**:
-   - Pergunta e resposta salvas em `messages`
+   - Pergunta e resposta salvas em `messages` com o mesmo `session_id`
    - Resposta retornada ao frontend para exibição no chat
+
+8. **Reabertura de Conversa (Frontend → Backend)**:
+   - Sidebar seleciona um chat salvo no histórico
+   - `GET /api/chats/:id/mensagens` retorna a conversa completa daquela sessão
+   - Frontend reconstrói a lista de mensagens e destaca o item ativo no histórico
 
 ### Isolamento Garantido em Todo o Fluxo
 - **Autenticação**: JWT valida empresa do usuário
 - **Queries MySQL**: Filtradas por `empresa_id = ?`
+- **Sessões de Chat**: Validadas por `usuario_id + empresa_id` antes de abrir, renomear ou excluir
 - **Buscas Qdrant**: Payload com `empresa_id` em todos os pontos
 - **Armazenamento**: PDFs organizados por empresa/usuário em disco
-- **Histórico**: Conversas isoladas por empresa no banco relacional</content>
-<parameter name="filePath">/home/highprofile/projeto-rag/ARCHITECTURE.md
+- **Histórico**: Conversas isoladas por empresa e organizadas por `session_id` no banco relacional
+
+## Estado da Documentação na Versão 1.0
+
+### Arquivos já bem comentados
+- `backend/server.js`
+- `backend/services/ragService.js`
+- `frontend/src/apps/Chat.js`
+- `frontend/src/layouts/FileTree.js`
+
+### Arquivos revisados e ajustados nesta versão
+- `frontend/src/layouts/Main.js`
+- `frontend/src/layouts/Sidebar.js`
+- `frontend/src/services/api.js`
+
+O objetivo desta revisão 1.0 foi manter comentários explicativos nos pontos de orquestração e fluxo, evitando excesso de comentários em trechos triviais.

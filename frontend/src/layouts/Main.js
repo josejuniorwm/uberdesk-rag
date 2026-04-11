@@ -17,6 +17,8 @@ import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 
 export default function Main() {
+  // Estado global da área autenticada do RAG.
+  // A sidebar altera esses valores e o Chat consome o mesmo estado via Outlet context.
   const [selectedPdfIds, setSelectedPdfIds] = useState([]);
   const [uploadFolderId, setUploadFolderId] = useState(null);
   const [filesReloadCounter, setFilesReloadCounter] = useState(0);
@@ -27,13 +29,13 @@ export default function Main() {
   const { pathname } = useLocation();
   const bc = document.body.classList;
 
-  // set sidebar to offset
+  // Algumas rotas legadas do template usam offset visual da sidebar.
   (offsets.includes(pathname)) ? bc.add("sidebar-offset") : bc.remove("sidebar-offset");
 
-  // auto close sidebar when switching pages in mobile
+  // Fecha a sidebar ao navegar em telas menores para evitar overlay preso.
   bc.remove("sidebar-show");
 
-  // scroll to top when switching pages
+  // Mantém a navegação consistente ao trocar entre telas protegidas.
   window.scrollTo(0, 0);
 
   return (
